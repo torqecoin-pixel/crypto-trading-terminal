@@ -1,0 +1,102 @@
+version: '3.9'
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: crypto-terminal-timescaledb
+    environment:
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: trading_password_change_in_production
+      POSTGRES_DB: trading_db
+      POSTGRES_INITDB_ARGS: "-c shared_buffers=256MB -c effective_cache_size=1GB"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/init:/docker-entrypoint-initdb.d
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: crypto-terminal-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - trading-network
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: crypto-terminal-backend
+    environment:
+      PYTHONUNBUFFERED: 1
+      DATABASE_URL: postgresql://trading:trading_password_change_in_production@timescaledb:5432/trading_db
+      REDIS_URL: redis://redis:6379
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - trading-network
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: crypto-terminal-frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    networks:
+      - trading-network
+    command: npm run dev
+
+  nginx:
+    image: nginx:alpine
+    container_name: crypto-terminal-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - trading-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  trading-network:
+    driver: bridge
